@@ -261,6 +261,81 @@ def parse_article(html_file_path):
     }
 
 
+def parse_gallery_items(html_file_path):
+    """施工事例一覧ページから個別アイテムを抽出"""
+
+    with open(html_file_path, 'r', encoding='utf-8') as f:
+        html_content = f.read()
+
+    items = []
+
+    # 各ギャラリーアイテムを抽出
+    # パターン: <div class="inner_item">...</div>
+    item_pattern = r'<div class="inner_item">\s*<a href="[^"]*">\s*<img src="([^"]*)"[^>]*alt="([^"]*)"[^>]*>\s*</a>\s*<div class="heading[^"]*"><h3 class="h"[^>]*>([^<]*)</h3>(?:<p>([^<]*)</p>)?</div>\s*<div class="infotxt">([^<]*(?:<[^>]*>[^<]*)*)</div>\s*</div>'
+
+    # より柔軟なパターンで抽出
+    inner_items = re.findall(r'<div class="inner_item">(.*?)</div>\s*(?=<!--|\s*<div class="inner_item">|</div>\s*</div>)', html_content, re.DOTALL)
+
+    for item_html in inner_items:
+        # 画像を抽出
+        img_match = re.search(r'<img[^>]*src="([^"]*)"[^>]*alt="([^"]*)"', item_html)
+        if not img_match:
+            continue
+
+        img_src = img_match.group(1)
+        img_alt = img_match.group(2)
+
+        # タイトルを抽出
+        title_match = re.search(r'<h3 class="h"[^>]*>([^<]*)</h3>', item_html)
+        title = title_match.group(1).strip() if title_match else img_alt
+
+        # サブタイトル（あれば）
+        subtitle_match = re.search(r'</h3>\s*<p>([^<]*)</p>', item_html)
+        subtitle = subtitle_match.group(1).strip() if subtitle_match else ""
+
+        # 説明文を抽出
+        infotxt_match = re.search(r'<div class="infotxt">(.*?)</div>', item_html, re.DOTALL)
+        description = ""
+        if infotxt_match:
+            desc_html = infotxt_match.group(1)
+            # HTMLタグを保持しつつ整形
+            description = desc_html.strip()
+
+        # カテゴリを抽出（data-targetから）
+        category_match = re.search(r'data-target="([^"]*)"', item_html)
+        category = category_match.group(1) if category_match else "施工事例"
+
+        # 画像パスを変換
+        filename = os.path.basename(img_src)
+        new_img_src = f"/imgblog/{filename}"
+
+        # 本文を構成
+        content = ""
+        if subtitle:
+            content += f"<p><strong>{subtitle}</strong></p>\n"
+        if new_img_src:
+            content += f'<img src="{new_img_src}" alt="{title}" />\n'
+        if description:
+            content += description
+
+        items.append({
+            'title': title,
+            'date': '',  # 施工事例には日付がない
+            'date_modified': '',
+            'content': content,
+            'tags': [category] if category else [],
+            'images': [{
+                'original': img_src,
+                'new': new_img_src,
+                'filename': filename
+            }],
+            'source_file': html_file_path,
+            'post_type': 'sekou_jirei'  # カスタム投稿タイプ
+        })
+
+    return items
+
+
 def generate_wxr_xml(articles, output_path):
     """WordPress WXR形式のXMLを生成"""
 
@@ -332,10 +407,17 @@ def generate_wxr_xml(articles, output_path):
             tags_xml += f'''
             <category domain="post_tag" nicename="{tag_slug}"><![CDATA[{tag}]]></category>'''
 
+        # 投稿タイプを決定
+        post_type = article.get('post_type', 'post')
+        if post_type == 'sekou_jirei':
+            link_path = 'sekou_jirei'
+        else:
+            link_path = 'blog'
+
         items_xml += f'''
     <item>
         <title>{title}</title>
-        <link>https://respec-office.net/blog/{slug}/</link>
+        <link>https://respec-office.net/{link_path}/{slug}/</link>
         <pubDate>{rfc_date}</pubDate>
         <dc:creator><![CDATA[admin]]></dc:creator>
         <guid isPermaLink="false">https://respec-office.net/?p={i}</guid>
@@ -351,7 +433,7 @@ def generate_wxr_xml(articles, output_path):
         <wp:status><![CDATA[publish]]></wp:status>
         <wp:post_parent>0</wp:post_parent>
         <wp:menu_order>0</wp:menu_order>
-        <wp:post_type><![CDATA[post]]></wp:post_type>
+        <wp:post_type><![CDATA[{post_type}]]></wp:post_type>
         <wp:post_password><![CDATA[]]></wp:post_password>
         <wp:is_sticky>0</wp:is_sticky>{tags_xml}
     </item>
@@ -396,6 +478,7 @@ def generate_csv(articles, output_path):
         # ヘッダー
         writer.writerow([
             'No',
+            '種別',
             'フォルダ名',
             'タイトル',
             '日付',
@@ -408,12 +491,17 @@ def generate_csv(articles, output_path):
             # フォルダ名を抽出
             folder = os.path.basename(os.path.dirname(article['source_file']))
 
+            # 種別を判定
+            post_type = article.get('post_type', 'post')
+            type_label = 'ブログ' if post_type == 'post' else '施工事例'
+
             # 本文からHTMLタグを除去して先頭100文字
             content_text = re.sub(r'<[^>]+>', '', article.get('content', ''))
             content_preview = content_text[:100].replace('\n', ' ')
 
             writer.writerow([
                 i,
+                type_label,
                 folder,
                 article.get('title', ''),
                 article.get('date', ''),
@@ -436,8 +524,10 @@ def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "csv"
 
     articles = []
+    gallery_items = []
 
-    # detail/ディレクトリ内の全記事を処理
+    # detail/ディレクトリ内の全記事を処理（ブログ）
+    print("=== ブログ記事を処理中 ===")
     for entry in os.listdir(detail_dir):
         entry_path = os.path.join(detail_dir, entry)
         if os.path.isdir(entry_path):
@@ -447,6 +537,7 @@ def main():
                 try:
                     article = parse_article(index_path)
                     if article['title']:  # タイトルがある記事のみ追加
+                        article['post_type'] = 'post'
                         articles.append(article)
                         print(f"  Title: {article['title']}")
                         print(f"  Date: {article['date']}")
@@ -455,28 +546,50 @@ def main():
                 except Exception as e:
                     print(f"  Error: {e}")
 
-    # 日付でソート
-    articles.sort(key=lambda x: x.get('date', ''), reverse=True)
+    print(f"\nブログ記事: {len(articles)} 件")
 
-    print(f"\n合計 {len(articles)} 件の記事を処理しました")
+    # 施工事例ページを処理
+    print("\n=== 施工事例を処理中 ===")
+    for i in range(1, 9):  # 施工事例1-8
+        gallery_dir = os.path.join(base_dir, f"施工事例{i}")
+        index_path = os.path.join(gallery_dir, "index.html")
+        if os.path.exists(index_path):
+            print(f"Processing: 施工事例{i}")
+            try:
+                items = parse_gallery_items(index_path)
+                gallery_items.extend(items)
+                print(f"  Found {len(items)} items")
+            except Exception as e:
+                print(f"  Error: {e}")
+
+    print(f"\n施工事例: {len(gallery_items)} 件")
+
+    # 全アイテムを結合
+    all_items = articles + gallery_items
+
+    # ブログ記事は日付でソート、施工事例は後ろに配置
+    articles.sort(key=lambda x: x.get('date', ''), reverse=True)
+    all_items = articles + gallery_items
+
+    print(f"\n合計 {len(all_items)} 件を処理しました")
 
     if mode == "csv":
         # CSV出力のみ
         output_csv = os.path.join(base_dir, "articles_list.csv")
-        count = generate_csv(articles, output_csv)
+        count = generate_csv(all_items, output_csv)
         print(f"\nCSVファイルを生成しました: {output_csv}")
         print(f"  記事数: {count}")
 
     elif mode == "xml":
         # WordPress WXR XMLを生成
         output_xml = os.path.join(base_dir, "wordpress_import.xml")
-        count = generate_wxr_xml(articles, output_xml)
+        count = generate_wxr_xml(all_items, output_xml)
         print(f"\nWordPress XMLファイルを生成しました: {output_xml}")
         print(f"  記事数: {count}")
 
         # 画像リストを出力
         output_images = os.path.join(base_dir, "image_list.txt")
-        img_count = collect_image_list(articles, output_images)
+        img_count = collect_image_list(all_items, output_images)
         print(f"\n画像リストを生成しました: {output_images}")
         print(f"  画像数: {img_count}")
 
@@ -484,7 +597,7 @@ def main():
         output_filenames = os.path.join(base_dir, "image_filenames.txt")
         with open(output_filenames, 'w', encoding='utf-8') as f:
             filenames = set()
-            for article in articles:
+            for article in all_items:
                 for img in article.get('images', []):
                     filenames.add(img['filename'])
             for fn in sorted(filenames):
