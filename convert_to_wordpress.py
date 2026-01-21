@@ -484,7 +484,7 @@ def generate_csv(articles, output_path):
             '日付',
             'タグ',
             '画像数',
-            '本文(先頭100文字)'
+            '本文(HTML)'
         ])
 
         for i, article in enumerate(articles, 1):
@@ -495,9 +495,8 @@ def generate_csv(articles, output_path):
             post_type = article.get('post_type', 'post')
             type_label = 'ブログ' if post_type == 'post' else '施工事例'
 
-            # 本文からHTMLタグを除去して先頭100文字
-            content_text = re.sub(r'<[^>]+>', '', article.get('content', ''))
-            content_preview = content_text[:100].replace('\n', ' ')
+            # 本文全体（HTML）
+            content_html = article.get('content', '')
 
             writer.writerow([
                 i,
@@ -507,7 +506,7 @@ def generate_csv(articles, output_path):
                 article.get('date', ''),
                 ', '.join(article.get('tags', [])),
                 len(article.get('images', [])),
-                content_preview
+                content_html
             ])
 
     return len(articles)
